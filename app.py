@@ -14,12 +14,12 @@ from index_universe import INDEX_GROUPS, INDEX_ALIASES, STOCKS_BY_INDEX
 
 IST = ZoneInfo("Asia/Kolkata")
 
-st.set_page_config(page_title="JMC Index Pattern Scanner", layout="wide")
+st.set_page_config(page_title="JMC Index Breakout + Pattern Scanner", layout="wide")
 st.title("JMC Index Breakout + Pattern Scanner")
-st.caption("Index breakout/breakdown → component stocks → 5M / 1H / Daily patterns")
+st.caption("Index breakout/breakdown → component stocks → 5M / 1H / Daily patterns • table-only stock scanner")
 
 # Angel One historical API is rate limited. Keep requests spaced out.
-MIN_REQUEST_GAP = 0.40
+MIN_REQUEST_GAP = 0.55
 
 def _throttle():
     last = st.session_state.get("last_api_request", 0.0)
@@ -98,6 +98,28 @@ def token(q):
     return None
 
 
+def _completed_only(d, interval):
+    """Remove the currently-forming candle to keep signals non-repainting."""
+    if d is None or d.empty or "datetime" not in d.columns:
+        return d
+    x=d.copy()
+    ts=pd.to_datetime(x["datetime"], errors="coerce")
+    now=datetime.now(IST)
+    if interval=="FIVE_MINUTE":
+        cutoff=now.replace(second=0, microsecond=0)
+        cutoff=cutoff.replace(minute=(cutoff.minute//5)*5)
+    elif interval=="ONE_HOUR":
+        cutoff=now.replace(minute=0, second=0, microsecond=0)
+    elif interval=="ONE_DAY":
+        cutoff=now.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        return x
+    # Angel One timestamps can be timezone-naive; compare as naive wall-clock.
+    tnaive=ts.dt.tz_localize(None) if getattr(ts.dt, "tz", None) is not None else ts
+    cnaive=cutoff.replace(tzinfo=None)
+    return x[tnaive < cnaive].reset_index(drop=True)
+
+
 def candles(t, interval, days):
     """Safe Angel One historical request. Never let a bad response crash Streamlit."""
     if not t:
@@ -129,7 +151,8 @@ def candles(t, interval, days):
             for c in ["open", "high", "low", "close", "volume"]:
                 d[c] = pd.to_numeric(d[c], errors="coerce")
             d["datetime"] = pd.to_datetime(d["datetime"], errors="coerce")
-            return d.dropna().reset_index(drop=True)
+            d=d.dropna().reset_index(drop=True)
+            return _completed_only(d, interval)
         except DataException as e:
             last_error = str(e)
             # The SDK raises DataException when the server returns HTML/non-JSON.
@@ -144,16 +167,20 @@ def candles(t, interval, days):
 
 
 def idx_signal(d):
-    if len(d) < 20:
+    """Strict, close-confirmed index breakout/breakdown using range + ATR + volume."""
+    if len(d) < 30:
         return "NO DATA"
-    p = d.iloc[:-1].tail(12)
-    c = d.iloc[-1]
-    hi = p.high.max()
-    lo = p.low.min()
-    med = p.volume.median()
-    if c.close > hi and c.volume >= med:
+    p=d.tail(21).iloc[:-1]
+    c=d.iloc[-1]
+    tr=pd.concat([(d.high-d.low),(d.high-d.close.shift(1)).abs(),(d.low-d.close.shift(1)).abs()],axis=1).max(axis=1)
+    atr=float(tr.rolling(14).mean().iloc[-1] or 0)
+    vavg=float(d.volume.tail(21).iloc[:-1].mean() or 0)
+    if atr<=0:
+        return "INSIDE"
+    volume_ok=(c.volume>=vavg*1.05) if vavg>0 else True
+    if c.close > p.high.max()+0.10*atr and volume_ok:
         return "BREAKOUT"
-    if c.close < lo and c.volume >= med:
+    if c.close < p.low.min()-0.10*atr and volume_ok:
         return "BREAKDOWN"
     return "INSIDE"
 
@@ -203,13 +230,14 @@ for i, (idx, sig, stock) in enumerate(pairs):
         a5, a1, ad = analyze(d5), analyze(d1), analyze(dd)
         sc = score(sig, a5, a1, ad)
         e, sl, t1, t2 = levels(d5, a5)
-        rows.append([idx, sig, stock, a5["pattern"], a1["pattern"], ad["pattern"], a5["direction"], a1["direction"], ad["direction"], sc, e, sl, t1, t2])
+        target="BULLISH" if sig=="BREAKOUT" else "BEARISH"
+        rows.append([idx, sig, stock, target, a5["pattern"], a1["pattern"], ad["pattern"], a5["direction"], a1["direction"], ad["direction"], sc, e, sl, t1, t2])
     except Exception as e:
         # One bad symbol must not stop the whole scanner.
         continue
 bar.empty()
 
-r = pd.DataFrame(rows, columns=["Index", "Index Signal", "Stock", "5M Pattern", "1H Pattern", "Daily Pattern", "5M Dir", "1H Dir", "Daily Dir", "Score", "Entry", "SL", "T1", "T2"])
+r = pd.DataFrame(rows, columns=["Index", "Index Signal", "Stock", "Setup", "5M Pattern", "1H Pattern", "Daily Pattern", "5M Dir", "1H Dir", "Daily Dir", "Score", "Entry", "SL", "T1", "T2"])
 
 if r.empty:
     st.info("No component stock data returned for the currently broken indices.")
@@ -219,7 +247,7 @@ r = r.sort_values("Score", ascending=False)
 st.subheader("🔥 High-Confluence Stock Setups")
 
 # Table-only stock scanner: pattern names are shown as text; no charts are rendered.
-shown = r[r.Score >= threshold].head(50).copy()
+shown = r[(r.Score >= threshold) & (r["5M Dir"] == r["Setup"])].head(50).copy()
 if shown.empty:
     st.info("No stocks meet the selected minimum score.")
 else:
@@ -236,4 +264,4 @@ else:
         },
     )
 
-st.caption("Stock results are table-only. 5M, 1H and Daily pattern names are shown as text; no chart is displayed in the scanner.")
+st.caption("Stock results are table-only: no chart is displayed. Patterns are evaluated on the last completed candle for each timeframe. A stock is shown only when its 5M direction agrees with the broken-index direction and its confluence score clears the selected threshold.")
