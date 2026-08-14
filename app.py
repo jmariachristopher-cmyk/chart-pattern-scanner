@@ -1,86 +1,239 @@
-import streamlit as st,pandas as pd,requests,pyotp
-from datetime import datetime,timedelta
+import time
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-# SmartApi is imported lazily after dependencies are installed.
-import plotly.graph_objects as go
-from pattern_engine import analyze,score,levels
-from index_universe import INDEX_GROUPS,INDEX_ALIASES,STOCKS_BY_INDEX
-IST=ZoneInfo('Asia/Kolkata')
-st.set_page_config(page_title='JMC Index Pattern Scanner',layout='wide')
-st.title('JMC Index Breakout + Pattern Scanner')
-st.caption('Index breakout/breakdown -> component stocks -> 5M / 1H / Daily patterns')
+
+import pandas as pd
+import pyotp
+import requests
+import streamlit as st
+from SmartApi import SmartConnect
+from SmartApi.smartExceptions import DataException
+
+from pattern_engine import analyze, score, levels
+from index_universe import INDEX_GROUPS, INDEX_ALIASES, STOCKS_BY_INDEX
+
+IST = ZoneInfo("Asia/Kolkata")
+
+st.set_page_config(page_title="JMC Index Pattern Scanner", layout="wide")
+st.title("JMC Index Breakout + Pattern Scanner")
+st.caption("Index breakout/breakdown → component stocks → 5M / 1H / Daily patterns")
+
+# Angel One historical API is rate limited. Keep requests spaced out.
+MIN_REQUEST_GAP = 0.40
+
+def _throttle():
+    last = st.session_state.get("last_api_request", 0.0)
+    wait = MIN_REQUEST_GAP - (time.monotonic() - last)
+    if wait > 0:
+        time.sleep(wait)
+    st.session_state.last_api_request = time.monotonic()
+
+
 with st.sidebar:
- st.header('Angel One');key=st.text_input('API Key',type='password');client=st.text_input('Client Code');pin=st.text_input('PIN / Password',type='password');secret=st.text_input('TOTP Secret',type='password')
- if st.button('Connect',type='primary'):
-  try:
-   try:
-    from SmartApi import SmartConnect
-   except ModuleNotFoundError as e:
-    st.error(f"Angel One SDK dependency missing: {e}. Please redeploy after updating requirements.txt.")
+    st.header("Angel One")
+    key = st.text_input("API Key", type="password")
+    client = st.text_input("Client Code")
+    pin = st.text_input("PIN / Password", type="password")
+    secret = st.text_input("TOTP Secret", type="password")
+
+    if st.button("Connect", type="primary"):
+        try:
+            if not all([key, client, pin, secret]):
+                st.error("Enter API Key, Client Code, PIN/Password and TOTP Secret.")
+            else:
+                api = SmartConnect(api_key=key)
+                login = api.generateSession(client, pin, pyotp.TOTP(secret).now())
+                if login and login.get("status"):
+                    st.session_state.api = api
+                    st.session_state.api_error = ""
+                    st.success("Connected.")
+                else:
+                    st.error(str(login))
+        except Exception as e:
+            st.error(f"Login failed: {e}")
+
+    max_stocks = st.slider("Stocks per broken index", 5, 25, 12)
+    threshold = st.slider("Minimum score", 50, 95, 70, 5)
+    if st.button("Clear connection"):
+        st.session_state.pop("api", None)
+        st.session_state.pop("last_api_request", None)
+        st.rerun()
+
+if "api" not in st.session_state:
+    st.warning("Connect Angel One first.")
     st.stop()
-   api=SmartConnect(api_key=key);r=api.generateSession(client,pin,pyotp.TOTP(secret).now())
-   if r and r.get('status'):st.session_state.api=api;st.success('Connected.')
-   else:st.error(str(r))
-  except Exception as e:st.error(str(e))
- max_stocks=st.slider('Stocks per broken index',5,25,12);threshold=st.slider('Minimum score',50,95,70,5)
- if st.button('Clear connection'):st.session_state.pop('api',None);st.rerun()
-if 'api' not in st.session_state:st.warning('Connect Angel One.');st.stop()
-api=st.session_state.api
-@st.cache_data(ttl=3600)
+
+api = st.session_state.api
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def master():
- r=requests.get('https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json',timeout=30);r.raise_for_status();return pd.DataFrame(r.json())
-m=master()
+    url = "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    return pd.DataFrame(r.json())
+
+try:
+    m = master()
+except Exception as e:
+    st.error(f"Could not load Angel One scrip master: {e}")
+    st.stop()
+
+
 def token(q):
- x=m[m.exch_seg.astype(str).str.upper()=='NSE'];q=q.upper()
- for c in ['name','symbol','tradingsymbol']:
-  if c in x:
-   z=x[x[c].astype(str).str.upper()==q]
-   if len(z):return str(z.iloc[0].token)
- for c in ['name','symbol','tradingsymbol']:
-  if c in x:
-   z=x[x[c].astype(str).str.upper().str.contains(q,na=False)]
-   if len(z):return str(z.iloc[0].token)
- return None
-def candles(t,interval,days):
- now=datetime.now(IST);start=now-timedelta(days=days);p={'exchange':'NSE','symboltoken':str(t),'interval':interval,'fromdate':start.strftime('%Y-%m-%d %H:%M'),'todate':now.strftime('%Y-%m-%d %H:%M')};r=api.getCandleData(p)
- if not r or not r.get('status') or not r.get('data'):return pd.DataFrame()
- d=pd.DataFrame(r['data'],columns=['datetime','open','high','low','close','volume'])
- for c in ['open','high','low','close','volume']:d[c]=pd.to_numeric(d[c],errors='coerce')
- d['datetime']=pd.to_datetime(d['datetime'],errors='coerce');return d.dropna().reset_index(drop=True)
+    """Resolve an NSE stock/index token from the Angel One scrip master."""
+    q = str(q).upper().strip()
+    x = m[m["exch_seg"].astype(str).str.upper().eq("NSE")].copy()
+    for c in ("name", "symbol", "tradingsymbol"):
+        if c not in x.columns:
+            continue
+        z = x[x[c].astype(str).str.upper().str.strip().eq(q)]
+        if len(z):
+            return str(z.iloc[0]["token"])
+    for c in ("name", "symbol", "tradingsymbol"):
+        if c not in x.columns:
+            continue
+        z = x[x[c].astype(str).str.upper().str.strip().str.contains(q, regex=False, na=False)]
+        if len(z):
+            return str(z.iloc[0]["token"])
+    return None
+
+
+def candles(t, interval, days):
+    """Safe Angel One historical request. Never let a bad response crash Streamlit."""
+    if not t:
+        return pd.DataFrame()
+
+    now = datetime.now(IST)
+    start = now - timedelta(days=days)
+    params = {
+        "exchange": "NSE",
+        "symboltoken": str(t),
+        "interval": interval,
+        "fromdate": start.strftime("%Y-%m-%d %H:%M"),
+        "todate": now.strftime("%Y-%m-%d %H:%M"),
+    }
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            _throttle()
+            r = api.getCandleData(params)
+            if not isinstance(r, dict):
+                raise RuntimeError(f"Unexpected Angel One response: {type(r).__name__}")
+            if not r.get("status"):
+                raise RuntimeError(r.get("message") or r.get("errorcode") or "Angel One returned status=False")
+            data = r.get("data") or []
+            if not data:
+                return pd.DataFrame()
+            d = pd.DataFrame(data, columns=["datetime", "open", "high", "low", "close", "volume"])
+            for c in ["open", "high", "low", "close", "volume"]:
+                d[c] = pd.to_numeric(d[c], errors="coerce")
+            d["datetime"] = pd.to_datetime(d["datetime"], errors="coerce")
+            return d.dropna().reset_index(drop=True)
+        except DataException as e:
+            last_error = str(e)
+            # The SDK raises DataException when the server returns HTML/non-JSON.
+            # Retry after a short pause; this commonly occurs during API bursts/gateway errors.
+            time.sleep(1.0 * (attempt + 1))
+        except Exception as e:
+            last_error = str(e)
+            time.sleep(0.6 * (attempt + 1))
+
+    st.session_state.api_error = last_error or "Unknown historical-data error"
+    return pd.DataFrame()
+
+
 def idx_signal(d):
- if len(d)<20:return 'NO DATA'
- p=d.iloc[:-1].tail(12);c=d.iloc[-1];hi=p.high.max();lo=p.low.min();med=p.volume.median()
- if c.close>hi and c.volume>=med:return 'BREAKOUT'
- if c.close<lo and c.volume>=med:return 'BREAKDOWN'
- return 'INSIDE'
-st.subheader('1. NSE Index Breakout / Breakdown');idxs=[]
-for group,names in INDEX_GROUPS.items():
- for name in names:
-  t=token(INDEX_ALIASES.get(name,name))
-  if not t:continue
-  try:s=idx_signal(candles(t,'FIVE_MINUTE',3))
-  except:s='ERROR'
-  idxs.append([group,name,s])
-idf=pd.DataFrame(idxs,columns=['Segment','Index','Signal'])
-st.dataframe(idf,use_container_width=True,hide_index=True)
-broken=idf[idf.Signal.isin(['BREAKOUT','BREAKDOWN'])]
-st.subheader('2. Stocks From Broken Indices');pairs=[]
-for _,r in broken.iterrows():
- for s in STOCKS_BY_INDEX.get(r['Index'],[])[:max_stocks]:pairs.append((r['Index'],r['Signal'],s))
-pairs=list(dict.fromkeys(pairs));rows=[];bar=st.progress(0)
-for i,(idx,sig,stock) in enumerate(pairs):
- bar.progress((i+1)/max(len(pairs),1));t=token(stock)
- if not t:continue
- try:
-  d5=candles(t,'FIVE_MINUTE',5);d1=candles(t,'ONE_HOUR',35);dd=candles(t,'ONE_DAY',250);a5=analyze(d5);a1=analyze(d1);ad=analyze(dd);sc=score(sig,a5,a1,ad);e,sl,t1,t2=levels(d5,a5)
-  rows.append([idx,sig,stock,a5['pattern'],a1['pattern'],ad['pattern'],a5['direction'],a1['direction'],ad['direction'],sc,e,sl,t1,t2])
- except Exception:pass
-r=pd.DataFrame(rows,columns=['Index','Index Signal','Stock','5M Pattern','1H Pattern','Daily Pattern','5M Dir','1H Dir','Daily Dir','Score','Entry','SL','T1','T2'])
-if r.empty:st.info('No component stock data returned.');st.stop()
-r=r.sort_values('Score',ascending=False);st.subheader('🔥 High-Confluence Setups');st.dataframe(r[r.Score>=threshold].head(15),use_container_width=True,hide_index=True)
-st.subheader('3. Chart Pattern View');stock=st.selectbox('Stock',r.Stock.tolist());t=token(stock)
-for title,d in [('5-Min Intraday',candles(t,'FIVE_MINUTE',5)),('1-Hour Positional',candles(t,'ONE_HOUR',35)),('Daily Positional',candles(t,'ONE_DAY',250))]:
- a=analyze(d)
- with st.expander(f'{title} • {a["pattern"]} • {a["direction"]}',expanded=title.startswith('5')):
-  fig=go.Figure(go.Candlestick(x=d.datetime,open=d.open,high=d.high,low=d.low,close=d.close));fig.update_layout(height=430,xaxis_rangeslider_visible=False);st.plotly_chart(fig,use_container_width=True);st.write('Pattern:',a['pattern']);st.write('Direction:',a['direction'])
-st.caption('Analysis only. Pattern detection is heuristic and cannot guarantee accuracy or returns.')
+    if len(d) < 20:
+        return "NO DATA"
+    p = d.iloc[:-1].tail(12)
+    c = d.iloc[-1]
+    hi = p.high.max()
+    lo = p.low.min()
+    med = p.volume.median()
+    if c.close > hi and c.volume >= med:
+        return "BREAKOUT"
+    if c.close < lo and c.volume >= med:
+        return "BREAKDOWN"
+    return "INSIDE"
+
+
+st.subheader("1. NSE Index Breakout / Breakdown")
+idxs = []
+progress = st.progress(0)
+index_items = [(group, name) for group, names in INDEX_GROUPS.items() for name in names]
+for i, (group, name) in enumerate(index_items):
+    progress.progress((i + 1) / max(len(index_items), 1))
+    t = token(INDEX_ALIASES.get(name, name))
+    if not t:
+        idxs.append([group, name, "TOKEN NOT FOUND"])
+        continue
+    d = candles(t, "FIVE_MINUTE", 3)
+    idxs.append([group, name, idx_signal(d) if not d.empty else "NO DATA"])
+progress.empty()
+
+idf = pd.DataFrame(idxs, columns=["Segment", "Index", "Signal"])
+st.dataframe(idf, use_container_width=True, hide_index=True)
+
+if st.session_state.get("api_error"):
+    st.warning("Some Angel One historical-data requests failed and were retried. Last API message: " + st.session_state.api_error)
+
+broken = idf[idf.Signal.isin(["BREAKOUT", "BREAKDOWN"])]
+st.subheader("2. Stocks From Broken Indices")
+
+pairs = []
+for _, row in broken.iterrows():
+    for stock in STOCKS_BY_INDEX.get(row["Index"], [])[:max_stocks]:
+        pairs.append((row["Index"], row["Signal"], stock))
+pairs = list(dict.fromkeys(pairs))
+
+rows = []
+bar = st.progress(0)
+for i, (idx, sig, stock) in enumerate(pairs):
+    bar.progress((i + 1) / max(len(pairs), 1))
+    t = token(stock)
+    if not t:
+        continue
+    try:
+        d5 = candles(t, "FIVE_MINUTE", 5)
+        d1 = candles(t, "ONE_HOUR", 35)
+        dd = candles(t, "ONE_DAY", 250)
+        if d5.empty or d1.empty or dd.empty:
+            continue
+        a5, a1, ad = analyze(d5), analyze(d1), analyze(dd)
+        sc = score(sig, a5, a1, ad)
+        e, sl, t1, t2 = levels(d5, a5)
+        rows.append([idx, sig, stock, a5["pattern"], a1["pattern"], ad["pattern"], a5["direction"], a1["direction"], ad["direction"], sc, e, sl, t1, t2])
+    except Exception as e:
+        # One bad symbol must not stop the whole scanner.
+        continue
+bar.empty()
+
+r = pd.DataFrame(rows, columns=["Index", "Index Signal", "Stock", "5M Pattern", "1H Pattern", "Daily Pattern", "5M Dir", "1H Dir", "Daily Dir", "Score", "Entry", "SL", "T1", "T2"])
+
+if r.empty:
+    st.info("No component stock data returned for the currently broken indices.")
+    st.stop()
+
+r = r.sort_values("Score", ascending=False)
+st.subheader("🔥 High-Confluence Stock Setups")
+
+# Table-only stock scanner: pattern names are shown as text; no charts are rendered.
+shown = r[r.Score >= threshold].head(50).copy()
+if shown.empty:
+    st.info("No stocks meet the selected minimum score.")
+else:
+    st.dataframe(
+        shown,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Score": st.column_config.NumberColumn("Score", format="%d"),
+            "Entry": st.column_config.NumberColumn("Entry", format="%.2f"),
+            "SL": st.column_config.NumberColumn("SL", format="%.2f"),
+            "T1": st.column_config.NumberColumn("T1", format="%.2f"),
+            "T2": st.column_config.NumberColumn("T2", format="%.2f"),
+        },
+    )
+
+st.caption("Stock results are table-only. 5M, 1H and Daily pattern names are shown as text; no chart is displayed in the scanner.")
