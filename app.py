@@ -1,7 +1,7 @@
 import streamlit as st,pandas as pd,requests,pyotp
 from datetime import datetime,timedelta
 from zoneinfo import ZoneInfo
-from SmartApi import SmartConnect
+# SmartApi is imported lazily after dependencies are installed.
 import plotly.graph_objects as go
 from pattern_engine import analyze,score,levels
 from index_universe import INDEX_GROUPS,INDEX_ALIASES,STOCKS_BY_INDEX
@@ -13,6 +13,11 @@ with st.sidebar:
  st.header('Angel One');key=st.text_input('API Key',type='password');client=st.text_input('Client Code');pin=st.text_input('PIN / Password',type='password');secret=st.text_input('TOTP Secret',type='password')
  if st.button('Connect',type='primary'):
   try:
+   try:
+    from SmartApi import SmartConnect
+   except ModuleNotFoundError as e:
+    st.error(f"Angel One SDK dependency missing: {e}. Please redeploy after updating requirements.txt.")
+    st.stop()
    api=SmartConnect(api_key=key);r=api.generateSession(client,pin,pyotp.TOTP(secret).now())
    if r and r.get('status'):st.session_state.api=api;st.success('Connected.')
    else:st.error(str(r))

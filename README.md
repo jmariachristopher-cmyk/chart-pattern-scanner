@@ -14,3 +14,7 @@ streamlit run app.py
 No orders are placed.
 
 The index-to-stock universe is a practical editable mapping. For production, it should be refreshed from official index constituent data because membership changes. Pattern detection is rule-based/heuristic and is not a guarantee of future returns.
+
+
+## Cloud deployment fix
+This version explicitly includes `websocket-client`, which is required by SmartAPI's websocket module. If Streamlit Cloud previously showed `ModuleNotFoundError: websocket`, replace the repository files with this version and redeploy/reboot the app.
