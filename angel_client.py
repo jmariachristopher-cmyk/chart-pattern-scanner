@@ -89,11 +89,21 @@ def find_indices(master):
     return x[["display","name","symbol","token","exch_seg"]].drop_duplicates("token").sort_values("display")
 
 
-def find_equities(master, symbols):
+def find_equities_all(master):
+    """Return the full NSE cash-equity universe from Angel One master."""
     m = master.copy()
-    x = m[(m["exch_seg"].str.upper() == "NSE") & (m["symbol"].astype(str).str.endswith("-EQ"))].copy()
+    for c in ["token", "symbol", "name", "exch_seg"]:
+        if c not in m.columns:
+            m[c] = ""
+    x = m[(m["exch_seg"].astype(str).str.upper() == "NSE") &
+          (m["symbol"].astype(str).str.upper().str.endswith("-EQ"))].copy()
+    x["base"] = x["symbol"].astype(str).str.replace("-EQ", "", regex=False).str.upper()
+    x["token"] = x["token"].astype(str)
+    return x[["base", "symbol", "token", "name", "exch_seg"]].drop_duplicates("base")
+
+
+def find_equities(master, symbols):
+    """Backward-compatible helper for callers that still pass a symbol list."""
+    x = find_equities_all(master)
     wanted = {s.strip().upper().replace("-EQ", "") for s in symbols if s.strip()}
-    if not wanted:
-        return x.iloc[0:0]
-    x["base"] = x["symbol"].str.replace("-EQ", "", regex=False).str.upper()
-    return x[x["base"].isin(wanted)][["base","symbol","token","name","exch_seg"]].drop_duplicates("base")
+    return x[x["base"].isin(wanted)].copy()

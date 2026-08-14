@@ -1,26 +1,22 @@
-# JMC Angel One Live Index Breakout + Pattern Scanner
+# JMC Angel One Live Index Breakout → Stock Pattern Scanner
 
-This version pulls historical OHLC candles directly from Angel One SmartAPI. It does not place orders.
+This version uses Angel One SmartAPI historical OHLC data and automatically loads the NSE cash-equity universe from the Angel One instrument master.
 
-## Streamlit Cloud Secrets
+## Important
+- No manual `Stocks to scan (comma separated)` field.
+- All NSE-EQ symbols are loaded automatically.
+- The scanner first checks all available NSE index instruments for breakout/breakdown.
+- Only after an index breaks out/breaks down does it scan stocks.
+- Stocks are first checked on 5-minute candles; 1-hour and Daily pattern checks are performed only for 5M candidates that pass the score/direction filter.
+- No order execution is included.
 
-Add these under **Settings → Secrets**:
+## Streamlit Secrets
 
 ```toml
-ANGEL_API_KEY = "YOUR_API_KEY"
-ANGEL_CLIENT_CODE = "YOUR_CLIENT_CODE"
-ANGEL_PIN = "YOUR_PIN"
-ANGEL_TOTP_SECRET = "YOUR_TOTP_SECRET"
+ANGEL_API_KEY = "..."
+ANGEL_CLIENT_CODE = "..."
+ANGEL_PIN = "..."
+ANGEL_TOTP_SECRET = "..."
 ```
 
-Then deploy `app.py`.
-
-## What it does
-1. Logs into Angel One with TOTP.
-2. Downloads the Angel One instrument master and resolves index/stock symbol tokens.
-3. Scans NSE indices for confirmed close breakout/breakdown against a configurable prior-bar range.
-4. Only after an index breakout/breakdown, scans the selected NSE-EQ stocks.
-5. Shows 5-minute candlestick/structural patterns plus 1-hour and Daily patterns.
-6. Produces entry/SL/T1/T2 levels from ATR for inspection only.
-
-No order execution is included in this version.
+Never commit real credentials to GitHub.
