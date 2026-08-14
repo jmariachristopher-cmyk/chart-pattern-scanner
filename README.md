@@ -1,15 +1,26 @@
-JMC Strict Pattern Scanner - FIXED
-Upload these files to the SAME GitHub repository:
-app.py
-pattern_engine.py
-requirements.txt
-runtime.txt
+# JMC Angel One Live Index Breakout + Pattern Scanner
 
-Important:
-1. Do not rename pattern_engine.py.
-2. Both app.py and pattern_engine.py must be in the repository root.
-3. Streamlit entrypoint must be app.py.
-4. requirements.txt installs pandas/numpy/streamlit.
-5. runtime.txt pins Python 3.12 for Streamlit Cloud compatibility.
+This version pulls historical OHLC candles directly from Angel One SmartAPI. It does not place orders.
 
-This version removes the SmartApi dependency from the pattern engine. The broker/live OHLC layer can be added separately after the scanner starts successfully.
+## Streamlit Cloud Secrets
+
+Add these under **Settings → Secrets**:
+
+```toml
+ANGEL_API_KEY = "YOUR_API_KEY"
+ANGEL_CLIENT_CODE = "YOUR_CLIENT_CODE"
+ANGEL_PIN = "YOUR_PIN"
+ANGEL_TOTP_SECRET = "YOUR_TOTP_SECRET"
+```
+
+Then deploy `app.py`.
+
+## What it does
+1. Logs into Angel One with TOTP.
+2. Downloads the Angel One instrument master and resolves index/stock symbol tokens.
+3. Scans NSE indices for confirmed close breakout/breakdown against a configurable prior-bar range.
+4. Only after an index breakout/breakdown, scans the selected NSE-EQ stocks.
+5. Shows 5-minute candlestick/structural patterns plus 1-hour and Daily patterns.
+6. Produces entry/SL/T1/T2 levels from ATR for inspection only.
+
+No order execution is included in this version.
